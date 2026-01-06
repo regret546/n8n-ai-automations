@@ -1,0 +1,179 @@
+{
+  "name": "Azure Billing Cost Daily Report",
+  "nodes": [
+    {
+      "parameters": {
+        "jsCode": "const rows = $input.all().map(i => i.json);\n\nreturn [\n  {\n    json: {\n      rowCount: rows.length,\n      summaryData: rows.map(r => ({\n        date: r.date,\n        resource: r.ResourceId,\n        meter: r.meterName,\n        chargeType: r.chargeType,\n        cost: r.costInBillingCurrency || r.cost || 0,\n        currency: r.billingCurrency || r.currency || \"USD\",\n        resourceGroup: r.resourceGroupName || \"\",\n        service: r.serviceFamily || r.consumedService || \"\"\n      }))\n    }\n  }\n];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [976, -224],
+      "id": "e9402980-530d-4efd-9707-a8e5ec11a5e1",
+      "name": "Prepare AI Summary Input"
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "triggerAtHour": 10
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [-1040, -320],
+      "id": "33371961-47f0-48c4-a721-af65fdf8c88a",
+      "name": "Scheduler — Daily Cost Sync"
+    },
+    {
+      "parameters": {
+        "authentication": "serviceAccount",
+        "documentId": {
+          "__rl": true,
+          "value": "<GOOGLE_SHEET_ID>",
+          "mode": "list",
+          "cachedResultName": "Azure Cost Export",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/<GOOGLE_SHEET_ID>/edit"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Costs",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/<GOOGLE_SHEET_ID>/edit#gid=0"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [-400, -592],
+      "id": "666366fe-6812-4c28-a0fc-b0d0215cee6b",
+      "name": "Read Existing Sheet Rows",
+      "credentials": {
+        "googleApi": {
+          "id": "<GOOGLE_SERVICE_ACCOUNT_CREDENTIAL_ID>",
+          "name": "Google Service Account"
+        }
+      }
+    },
+
+    {
+      "parameters": {
+        "resource": "blob",
+        "container": {
+          "__rl": true,
+          "value": "<AZURE_STORAGE_CONTAINER>",
+          "mode": "id"
+        },
+        "returnAll": true,
+        "options": {
+          "filter": []
+        },
+        "requestOptions": {}
+      },
+      "type": "n8n-nodes-base.azureStorage",
+      "typeVersion": 1,
+      "position": [-512, 64],
+      "id": "ef2dbb47-e44b-412c-99f4-a8beb3803ab6",
+      "name": "List Export Blobs from Azure",
+      "credentials": {
+        "azureStorageSharedKeyApi": {
+          "id": "<AZURE_SHARED_KEY_CREDENTIAL_ID>",
+          "name": "Azure Storage Shared Key"
+        }
+      }
+    },
+
+    {
+      "parameters": {
+        "url": "=https://<STORAGE_ACCOUNT>.blob.core.windows.net/<CONTAINER_NAME>/{{ $json.blobName }}?<SAS_TOKEN>",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [-224, 80],
+      "id": "49abe28a-3743-4fbe-8d63-a3a2209c0bef",
+      "name": "Download Export File"
+    },
+
+    {
+      "parameters": {
+        "authentication": "serviceAccount",
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "<GOOGLE_SHEET_ID>",
+          "mode": "list",
+          "cachedResultName": "Azure Cost Export",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/<GOOGLE_SHEET_ID>/edit"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Costs",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/<GOOGLE_SHEET_ID>/edit#gid=0"
+        }
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [992, -512],
+      "id": "fe4c4889-ca15-471e-a208-efbc94ed9e53",
+      "name": "Append New Rows to Sheet",
+      "credentials": {
+        "googleApi": {
+          "id": "<GOOGLE_SERVICE_ACCOUNT_CREDENTIAL_ID>",
+          "name": "Google Service Account"
+        }
+      }
+    },
+
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "gpt-4.1-mini",
+          "mode": "list",
+          "cachedResultName": "GPT-4.1-MINI"
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 2.1,
+      "position": [1648, -288],
+      "id": "51a8afbc-ad82-46e1-ace6-28682a747434",
+      "name": "AI Cost Summary Generator",
+      "credentials": {
+        "openAiApi": {
+          "id": "<OPENAI_CREDENTIAL_ID>",
+          "name": "OpenAI Account"
+        }
+      }
+    },
+
+    {
+      "parameters": {
+        "fromEmail": "<SENDER_EMAIL>",
+        "toEmail": "<RECIPIENT_EMAIL>",
+        "subject": "=Azure Cost Update",
+        "html": "=Hello, Your Azure cost sheet has been updated."
+      },
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [1952, -288],
+      "id": "db70220d-3d7d-422e-9ec6-450ef9bf361d",
+      "name": "Send Cost Summary Email",
+      "credentials": {
+        "smtp": {
+          "id": "<SMTP_CREDENTIAL_ID>",
+          "name": "SMTP Account"
+        }
+      }
+    }
+  ],
+
+  "connections": {
+    "...": "unchanged workflow wiring"
+  }
+}
