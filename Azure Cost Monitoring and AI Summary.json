@@ -32,39 +32,48 @@
         "authentication": "serviceAccount",
         "documentId": {
           "__rl": true,
-          "value": "<GOOGLE_SHEET_ID>",
+          "value": "<GOOGLE_SHEET_DOCUMENT_ID>",
           "mode": "list",
           "cachedResultName": "Azure Cost Export",
-          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/<GOOGLE_SHEET_ID>/edit"
+          "cachedResultUrl": "<GOOGLE_SHEET_URL>"
         },
         "sheetName": {
           "__rl": true,
           "value": "gid=0",
           "mode": "list",
           "cachedResultName": "Costs",
-          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/<GOOGLE_SHEET_ID>/edit#gid=0"
+          "cachedResultUrl": "<GOOGLE_SHEET_URL>"
         },
         "options": {}
       },
       "type": "n8n-nodes-base.googleSheets",
       "typeVersion": 4.7,
-      "position": [-400, -592],
+      "position": [-416, -624],
       "id": "666366fe-6812-4c28-a0fc-b0d0215cee6b",
       "name": "Read Existing Sheet Rows",
       "credentials": {
         "googleApi": {
-          "id": "<GOOGLE_SERVICE_ACCOUNT_CREDENTIAL_ID>",
-          "name": "Google Service Account"
+          "id": "<GOOGLE_SERVICE_ACCOUNT_ID>",
+          "name": "<GOOGLE_SERVICE_ACCOUNT_NAME>"
         }
       }
     },
-
+    {
+      "parameters": {
+        "jsCode": "// Read all rows from Google Sheets\nconst rows = $input.all().map(i => i.json);\n\nconst key = r => `${r.ResourceId}__${r.meterName}__${r.date}__${r.chargeType}`.toLowerCase().trim();\n\nconst existing = new Set();\n\nfor (const r of rows) {\n  if (!r.ResourceId || !r.meterName || !r.date) continue;\n  existing.add(key(r));\n}\n\nreturn [\n  {\n    json: {\n      existingKeys: Array.from(existing)\n    }\n  }\n];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-128, -624],
+      "id": "3193fa10-c386-483e-8f91-179702962d16",
+      "name": "Build Existing Row Keys (Deduplication)"
+    },
     {
       "parameters": {
         "resource": "blob",
         "container": {
           "__rl": true,
-          "value": "<AZURE_STORAGE_CONTAINER>",
+          "value": "=cost-exports/",
           "mode": "id"
         },
         "returnAll": true,
@@ -80,15 +89,24 @@
       "name": "List Export Blobs from Azure",
       "credentials": {
         "azureStorageSharedKeyApi": {
-          "id": "<AZURE_SHARED_KEY_CREDENTIAL_ID>",
-          "name": "Azure Storage Shared Key"
+          "id": "<AZURE_STORAGE_KEY_ID>",
+          "name": "<AZURE_STORAGE_KEY_NAME>"
         }
       }
     },
-
     {
       "parameters": {
-        "url": "=https://<STORAGE_ACCOUNT>.blob.core.windows.net/<CONTAINER_NAME>/{{ $json.blobName }}?<SAS_TOKEN>",
+        "jsCode": "const EXPORT_PREFIX = 'daily/daily-cost-exports-DailyCostExport/';\n\nconst blobs = items\n  .filter(x => x.json.name.startsWith(EXPORT_PREFIX) && x.json.name.endsWith('.csv.gz'))\n  .map(x => ({ name: x.json.name, lastModified: new Date(x.json.properties.lastModified) }));\n\nif (blobs.length === 0) {\n  throw new Error('No matching .csv.gz cost export files found');\n}\n\nfunction getRunKey(name) {\n  const parts = name.split('/');\n  return parts[parts.length - 2];\n}\n\nconst groups = {};\nfor (const blob of blobs) {\n  const key = getRunKey(blob.name);\n  if (!groups[key]) groups[key] = [];\n  groups[key].push(blob);\n}\n\nconst newestKey = Object.keys(groups).sort((a, b) => {\n  const aMax = Math.max(...groups[a].map(f => f.lastModified));\n  const bMax = Math.max(...groups[b].map(f => f.lastModified));\n  return bMax - aMax;\n})[0];\n\nreturn groups[newestKey].map(f => ({ json: { blobName: f.name, lastModified: f.lastModified.toISOString() } }));\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-368, -112],
+      "id": "e0806200-3db6-403f-bfd3-ec05212c891d",
+      "name": "Select Newest Export File"
+    },
+    {
+      "parameters": {
+        "url": "=https://<AZURE_STORAGE_ACCOUNT>.blob.core.windows.net/cost-exports/{{ $json.blobName }}?<SAS_TOKEN_PLACEHOLDER>",
         "options": {}
       },
       "type": "n8n-nodes-base.httpRequest",
@@ -97,39 +115,115 @@
       "id": "49abe28a-3743-4fbe-8d63-a3a2209c0bef",
       "name": "Download Export File"
     },
-
+    {
+      "parameters": {
+        "outputPrefix": "data"
+      },
+      "type": "n8n-nodes-base.compression",
+      "typeVersion": 1.1,
+      "position": [-96, -112],
+      "id": "5306c693-5866-4560-bc30-9cda36c265d9",
+      "name": "Decompress GZIP Export"
+    },
+    {
+      "parameters": {
+        "binaryPropertyName": "data0",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1.1,
+      "position": [32, 80],
+      "id": "41779be4-0906-493c-91d0-7557f022e729",
+      "name": "Parse CSV to Rows"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [528, -352],
+      "id": "1d081ae8-d24b-4ef0-80ee-00718283f31d",
+      "name": "Merge CSV Rows + Existing Keys"
+    },
+    {
+      "parameters": {
+        "jsCode": "const newRows = $input.all(0).map(i => i.json);\n\nlet existingKeys = [];\ntry {\n  existingKeys = $input.all(1)[0].json.existingKeys || [];\n} catch (e) {\n  existingKeys = [];\n}\n\nconst existing = new Set(existingKeys);\n\nconst key = r => `${r.ResourceId}__${r.meterName}__${r.date}__${r.chargeType}`.toLowerCase().trim();\n\nconst filtered = [];\n\nfor (const r of newRows) {\n  if (!r.ResourceId || !r.meterName || !r.date) continue;\n  if (!existing.has(key(r))) {\n    filtered.push(r);\n  }\n}\n\nreturn [\n  ...filtered.map(r => ({ json: r })),\n  { json: { rowCount: filtered.length, summaryData: filtered } }\n];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [736, -352],
+      "id": "44120985-2a3d-4918-9178-e6a7e1b2e353",
+      "name": "Filter New Unique Rows"
+    },
     {
       "parameters": {
         "authentication": "serviceAccount",
         "operation": "append",
         "documentId": {
           "__rl": true,
-          "value": "<GOOGLE_SHEET_ID>",
+          "value": "<GOOGLE_SHEET_DOCUMENT_ID>",
           "mode": "list",
           "cachedResultName": "Azure Cost Export",
-          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/<GOOGLE_SHEET_ID>/edit"
+          "cachedResultUrl": "<GOOGLE_SHEET_URL>"
         },
         "sheetName": {
           "__rl": true,
           "value": "gid=0",
           "mode": "list",
           "cachedResultName": "Costs",
-          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/<GOOGLE_SHEET_ID>/edit#gid=0"
-        }
+          "cachedResultUrl": "<GOOGLE_SHEET_URL>"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
       },
       "type": "n8n-nodes-base.googleSheets",
       "typeVersion": 4.7,
-      "position": [992, -512],
+      "position": [960, -512],
       "id": "fe4c4889-ca15-471e-a208-efbc94ed9e53",
       "name": "Append New Rows to Sheet",
       "credentials": {
         "googleApi": {
-          "id": "<GOOGLE_SERVICE_ACCOUNT_CREDENTIAL_ID>",
-          "name": "Google Service Account"
+          "id": "<GOOGLE_SERVICE_ACCOUNT_ID>",
+          "name": "<GOOGLE_SERVICE_ACCOUNT_NAME>"
         }
       }
     },
-
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "2ad746ae-23f5-4674-882e-ca40e901c131",
+              "leftValue": "={{ $json.rowCount }}",
+              "rightValue": 1,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [1424, -224],
+      "id": "bbe9a9e1-4a5f-406e-b276-e78b0e48b72f",
+      "name": "Check If Rows Were Added"
+    },
     {
       "parameters": {
         "modelId": {
@@ -137,43 +231,139 @@
           "value": "gpt-4.1-mini",
           "mode": "list",
           "cachedResultName": "GPT-4.1-MINI"
-        }
+        },
+        "responses": {
+          "values": [
+            {
+              "role": "system",
+              "content": "You are a FinOps cloud cost analyst."
+            },
+            {
+              "content": "=Here are newly added Azure cost rows."
+            }
+          ]
+        },
+        "builtInTools": {},
+        "options": {}
       },
       "type": "@n8n/n8n-nodes-langchain.openAi",
       "typeVersion": 2.1,
-      "position": [1648, -288],
+      "position": [1632, -288],
       "id": "51a8afbc-ad82-46e1-ace6-28682a747434",
       "name": "AI Cost Summary Generator",
       "credentials": {
         "openAiApi": {
-          "id": "<OPENAI_CREDENTIAL_ID>",
-          "name": "OpenAI Account"
+          "id": "<OPENAI_API_CREDENTIAL_ID>",
+          "name": "<OPENAI_API_CREDENTIAL_NAME>"
         }
       }
     },
-
     {
       "parameters": {
-        "fromEmail": "<SENDER_EMAIL>",
-        "toEmail": "<RECIPIENT_EMAIL>",
-        "subject": "=Azure Cost Update",
-        "html": "=Hello, Your Azure cost sheet has been updated."
+        "fromEmail": "<SMTP_FROM_EMAIL>",
+        "toEmail": "<REPORT_RECIPIENT_EMAIL>",
+        "subject": "=Azure Cost Update — {{ $('Prepare AI Summary Input').item.json.rowCount }} new records added",
+        "html": "=Hello,  Your Azure cost sheet has been updated.",
+        "options": {}
       },
       "type": "n8n-nodes-base.emailSend",
       "typeVersion": 2.1,
       "position": [1952, -288],
       "id": "db70220d-3d7d-422e-9ec6-450ef9bf361d",
       "name": "Send Cost Summary Email",
+      "webhookId": "<WEBHOOK_ID>",
       "credentials": {
         "smtp": {
           "id": "<SMTP_CREDENTIAL_ID>",
-          "name": "SMTP Account"
+          "name": "<SMTP_CREDENTIAL_NAME>"
         }
       }
+    },
+    {
+      "parameters": {
+        "fromEmail": "<SMTP_FROM_EMAIL>",
+        "toEmail": "<REPORT_RECIPIENT_EMAIL>",
+        "subject": "=Azure Cost Update — No new cost records today",
+        "html": "=Azure Cost Update — No new cost records today",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [1696, -96],
+      "id": "2272e60b-17e9-4917-aa1f-bb6e16eebae5",
+      "name": "Send No-New-Rows Notification",
+      "webhookId": "<WEBHOOK_ID>",
+      "credentials": {
+        "smtp": {
+          "id": "<SMTP_CREDENTIAL_ID>",
+          "name": "<SMTP_CREDENTIAL_NAME>"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "## Read Existing Sheet & Build Deduplication Keys",
+        "height": 448,
+        "width": 896,
+        "color": 4
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [-640, -784],
+      "typeVersion": 1,
+      "id": "28a1ccaf-9dec-432e-9ec1-a9e7776fe13c",
+      "name": "Sticky Note"
+    },
+    {
+      "parameters": {
+        "content": "## Download & Parse Latest Azure Cost Export",
+        "height": 480,
+        "width": 912,
+        "color": 4
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [-640, -224],
+      "typeVersion": 1,
+      "id": "3672a4af-1627-453e-a44b-2dc321a65d86",
+      "name": "Sticky Note1"
+    },
+    {
+      "parameters": {
+        "content": "## Filter Unique Rows & Append to Sheet",
+        "height": 752,
+        "width": 752,
+        "color": 4
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [448, -656],
+      "typeVersion": 1,
+      "id": "16677bea-6e39-4a68-b21f-d79459c33294",
+      "name": "Sticky Note2"
+    },
+    {
+      "parameters": {
+        "content": "## AI Cost Summary & Email Notifications",
+        "height": 624,
+        "width": 816,
+        "color": 4
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [1360, -528],
+      "typeVersion": 1,
+      "id": "b502df1c-e205-498f-9b73-fa145bbdf517",
+      "name": "Sticky Note4"
     }
   ],
-
-  "connections": {
-    "...": "unchanged workflow wiring"
-  }
+  "pinData": {},
+  "connections": {},
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "<VERSION_ID>",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "<INSTANCE_ID>"
+  },
+  "id": "<WORKFLOW_ID>",
+  "tags": []
 }
